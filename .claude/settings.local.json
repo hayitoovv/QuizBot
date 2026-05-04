@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from docx import Document; d = Document\\(r'D:\\\\Telegram Download\\\\Boshlang\\\\'ich ta\\\\'lim pedagogikasi.docx'\\); [print\\(repr\\(p.text\\)\\) for p in d.paragraphs[:80]]\")",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import main; print\\('Import OK, savollar:', len\\(main.load_quiz_from_docx\\(\\\\\"Boshlang'ich ta'lim pedagogikasi.docx\\\\\"\\)\\)\\)\")"
+    ]
+  }
+}
