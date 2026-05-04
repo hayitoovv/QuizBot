@@ -289,6 +289,7 @@ def _send_preview(chat_id, edit_msg_id, test_id, mode, start, timer, chat_type):
         "solo": is_solo,
         "solo_advanced": False,
         "lock": threading.Lock(),
+        "stop_voters": set(),
     }
     if is_solo:
         mode_line = "🧑 Yakka tartibda — javob berishingiz bilan keyingi savolga o'tadi"
@@ -394,7 +395,7 @@ def _advance(chat_id):
         print(f"_advance error: {e}")
 
 
-def finish_session(chat_id):
+def finish_session(chat_id, stopped=False):
     state = discard_session(chat_id)
     if not state:
         return
@@ -402,6 +403,10 @@ def finish_session(chat_id):
     total = len(get_quiz_template(state["test_id"]))
     elapsed = time.time() - (state["start_time"] or time.time())
     n_quiz = len(state["quiz"])
+    pos = state["pos"]
+    # Premature stop bo'lsa: hozirgi savol ham ko'rilgan deb hisoblanadi
+    shown = pos + (1 if state.get("active_poll_id") else 0)
+    shown = min(shown, n_quiz)
     scores = state["user_scores"]
 
     if not scores:
@@ -416,15 +421,23 @@ def finish_session(chat_id):
         for i, s in enumerate(ordered):
             badge = medals[i] if i < len(medals) else f"<b>{i + 1}.</b>"
             answered = s["score"] + s["wrong"]
-            skipped = max(0, (n_quiz - s["first_pos"]) - answered)
+            shown_after_join = max(0, shown - s["first_pos"])
+            skipped = max(0, shown_after_join - answered)
             lines.append(
                 f"{badge} <b>{s['name']}</b>\n"
                 f"   ✅ {s['score']}   ❌ {s['wrong']}   🦘 {skipped}"
             )
         body = "\n\n".join(lines)
 
+    if stopped:
+        title_line = (
+            f"⏹ <b>\"{info['name']} [{total}]\"</b> testi to'xtatildi! "
+            f"({shown}/{n_quiz} savol)"
+        )
+    else:
+        title_line = f"🎯 <b>\"{info['name']} [{total}]\"</b> testi yakunlandi!"
     text = (
-        f"🎯 <b>\"{info['name']} [{total}]\"</b> testi yakunlandi!\n\n"
+        f"{title_line}\n\n"
         f"<i>{state['label']}</i>\n"
         f"⏱ Jami vaqt: {elapsed:.1f} soniya\n\n"
         f"{body}"
@@ -474,12 +487,43 @@ def cmd_start(message):
     )
 
 
+STOP_THRESHOLD = 3  # guruhda /stop uchun zarur turli userlar soni
+
 @bot.message_handler(commands=["stop"])
 def cmd_stop(message):
-    if discard_session(message.chat.id):
-        bot.send_message(message.chat.id, "⏹ Test to'xtatildi.\n/start orqali qaytadan boshlang.")
+    chat_id = message.chat.id
+    state = chat_session.get(chat_id)
+    if not state:
+        bot.send_message(chat_id, "Hozir faol test yo'q.\n/start orqali boshlang.")
+        return
+
+    if state.get("solo"):
+        finish_session(chat_id, stopped=True)
+        return
+
+    # Guruh: ovoz to'plash
+    user_id = message.from_user.id
+    with state["lock"]:
+        voters = state["stop_voters"]
+        already = user_id in voters
+        voters.add(user_id)
+        n = len(voters)
+
+    if n >= STOP_THRESHOLD:
+        finish_session(chat_id, stopped=True)
+        return
+
+    if already:
+        text = (
+            f"⏸ Siz allaqachon /stop ovozini bergansiz.\n"
+            f"Hozirgi: <b>{n}/{STOP_THRESHOLD}</b>"
+        )
     else:
-        bot.send_message(message.chat.id, "Hozir faol test yo'q.\n/start orqali boshlang.")
+        text = (
+            f"⏸ /stop ovozlari: <b>{n}/{STOP_THRESHOLD}</b>\n"
+            f"Testni to'xtatish uchun yana <b>{STOP_THRESHOLD - n}</b> ta foydalanuvchining /stop si kerak."
+        )
+    bot.send_message(chat_id, text, parse_mode="HTML")
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("sel:"))
