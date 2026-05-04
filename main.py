@@ -5,7 +5,7 @@ import random
 import time
 import threading
 
-TOKEN = "8475185063:AAEUpGMnfmbrV0SUNRR-egn-Rq60wcooXI0"
+TOKEN = "Your bot token"
 bot = telebot.TeleBot(TOKEN, num_threads=8)
 
 
