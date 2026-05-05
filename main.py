@@ -1,11 +1,15 @@
+import os
 import telebot
 from telebot import types
 from docx import Document
 import random
+import re
 import time
 import threading
 
-TOKEN = "Your bot token"
+TOKEN = os.environ.get("BOT_TOKEN", "Your bot token")
+if TOKEN == "Your bot token":
+    raise RuntimeError("BOT_TOKEN env variable o'rnatilmagan!")
 bot = telebot.TeleBot(TOKEN, num_threads=8)
 
 
@@ -43,6 +47,22 @@ TESTS = {
         "name": "Boshlang'ich ta'lim pedagogikasi",
         "file": "Boshlang'ich ta'lim pedagogikasi.docx",
     },
+    "btt": {
+        "name": "Boshlang'ich ta'limda tarbiya",
+        "file": "Boshlang'ich ta'limda tarbiya.docx",
+    },
+    "mtm": {
+        "name": "Matematika va uni o'qitish metodikasi",
+        "file": "Matematika va uni o'qitish metodikasi.docx",
+    },
+    "otm": {
+        "name": "Ona tili va uni o'qitish metodikasi",
+        "file": "Ona tili va uni o'qitish metodikasi.docx",
+    },
+    "tfm": {
+        "name": "Tabiiy fanlarni o'qitish metodikasi",
+        "file": "Tabiiy fanlarni o'qitish metodikasi.docx",
+    },
 }
 
 CHUNK_SIZES = {"20": 20, "50": 50, "100": 100}
@@ -61,17 +81,30 @@ def bot_username():
 
 
 # ====== DOCX parser ======
-# Format:
+# Ikki format qo'llab-quvvatlanadi:
+#
+# Format A (==== / ++++ / # bilan):
 #   Savol matni
 #   ====
-#   # To'g'ri variant   (# belgisi to'g'ri javobni bildiradi)
+#   # To'g'ri variant
 #   ====
 #   Variant 2
 #   ====
 #   Variant 3
 #   ====
 #   Variant 4
-#   ++++   (savollar oraliq ajratgich; oxirgi savolda bo'lmasligi mumkin)
+#   ++++   (oxirgi savolda bo'lmasligi mumkin)
+#
+# Format B (+/- bilan):
+#   Savol matni
+#   -Variant
+#   +To'g'ri variant
+#   -Variant
+#   -Variant
+#   Keyingi savol matni
+#   -...
+#   +...
+#   ...
 def load_quiz_from_docx(file_path):
     try:
         document = Document(file_path)
@@ -81,10 +114,31 @@ def load_quiz_from_docx(file_path):
 
     lines = []
     for p in document.paragraphs:
-        text = p.text.replace("\xa0", " ").strip()
-        if text:
-            lines.append(text)
+        raw = p.text.replace("\xa0", " ")
+        # Ajratgichlar (++++ va ====) atrofini placeholder bilan ajratamiz,
+        # qolgan barcha whitespace (jumladan \n) probelga aylantirish (ko'p qatorli savol matni
+        # bir butun bo'lib qolishi uchun)
+        raw = re.sub(r"\s*\+\+\+\+\s*", "\x01++++\x01", raw)
+        raw = re.sub(r"\s*====\s*", "\x01====\x01", raw)
+        raw = re.sub(r"\s+", " ", raw)
+        for sub in raw.split("\x01"):
+            sub = sub.strip()
+            if sub:
+                lines.append(sub)
 
+    if not lines:
+        return []
+
+    # Format aniqlash:
+    #   ++++ bor → format A (savollar oraliq ajratgich)
+    #   yo'q lekin +/- prefiks bor → format B
+    has_pluses = any(line.startswith("++++") for line in lines[:500])
+    if has_pluses:
+        return _parse_format_a(lines)
+    return _parse_format_b(lines)
+
+
+def _parse_format_a(lines):
     blocks = [[]]
     for line in lines:
         if line.startswith("++++"):
@@ -96,18 +150,26 @@ def load_quiz_from_docx(file_path):
     for block in blocks:
         if not block:
             continue
-        sections = [[]]
-        for line in block:
-            if line.startswith("===="):
-                sections.append([])
-            else:
-                sections[-1].append(line)
-        question = " ".join(sections[0]).strip()
-        if not question:
+
+        # ==== ajratgich bormi yo'qmi
+        has_eq = any(line.startswith("====") for line in block)
+        if has_eq:
+            sections = [[]]
+            for line in block:
+                if line.startswith("===="):
+                    sections.append([])
+                else:
+                    sections[-1].append(line)
+            question = " ".join(sections[0]).strip()
+            variants_raw = [" ".join(s).strip() for s in sections[1:] if any(s)]
+        else:
+            # ==== yo'q — har qator alohida: birinchi = savol, qolgani = variantlar
+            question = block[0].strip()
+            variants_raw = [v.strip() for v in block[1:] if v.strip()]
+
+        if not question or len(variants_raw) < 2:
             continue
-        variants_raw = [" ".join(s).strip() for s in sections[1:] if any(s)]
-        if len(variants_raw) < 2:
-            continue
+
         correct_index = 0
         variants = []
         for i, v in enumerate(variants_raw):
@@ -120,6 +182,62 @@ def load_quiz_from_docx(file_path):
             "variantlar": variants,
             "javob_index": correct_index,
         })
+    return quiz_data
+
+
+def _parse_format_b(lines):
+    # Pre-process: bitta paragrafda yopishib qolgan variantlarni ajratish
+    # Masalan: "- Foo bar+ Baz qux" → ["- Foo bar", "+ Baz qux"]
+    expanded = []
+    for line in lines:
+        if line.startswith("+") or line.startswith("-"):
+            # Ichidagi yopishib qolgan +/- markerlarni topib bo'lakka ajratish.
+            # Faqat: harfdan keyin (apostrof emas) keladigan +/- va keyingi
+            # variant bosh harf bilan boshlansa (uzbek lotin/kiril yoki ASCII).
+            split_line = re.sub(
+                r"(?<=\w)([+\-])(?=\s+[A-ZА-ЯЁЎҒҲҚ])",
+                r"\n\1",
+                line,
+            )
+            for part in split_line.split("\n"):
+                part = part.strip()
+                if part:
+                    expanded.append(part)
+        else:
+            expanded.append(line)
+    lines = expanded
+
+    quiz_data = []
+    cur_q = None
+    cur_vars = []
+    cur_correct = None
+
+    def flush():
+        if cur_q and cur_vars:
+            quiz_data.append({
+                "savol": cur_q,
+                "variantlar": list(cur_vars),
+                "javob_index": cur_correct if cur_correct is not None else 0,
+            })
+
+    for line in lines:
+        if line.startswith("+") or line.startswith("-"):
+            if cur_q is None:
+                continue  # variant savoldan oldin bo'lsa, tashlab yuboramiz
+            is_correct = line.startswith("+")
+            text = line[1:].strip()
+            if not text:
+                continue
+            cur_vars.append(text)
+            if is_correct:
+                cur_correct = len(cur_vars) - 1
+        else:
+            # Yangi savol — avvalgisini saqlash
+            flush()
+            cur_q = line
+            cur_vars = []
+            cur_correct = None
+    flush()
     return quiz_data
 
 
@@ -337,6 +455,13 @@ def _kb_preview(test_id, mode, start, timer, chat_type):
     return markup
 
 
+def _truncate(text, limit):
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit - 1].rstrip() + "…"
+
+
 def send_current_poll(chat_id):
     state = chat_session.get(chat_id)
     if not state:
@@ -352,19 +477,17 @@ def send_current_poll(chat_id):
         return
 
     q = state["quiz"][state["pos"]]
-    harflar = [chr(65 + i) for i in range(len(q["variantlar"]))]
+    n_quiz = len(state["quiz"])
 
-    bot.send_message(chat_id, format_q_text(state), parse_mode="HTML")
-
+    question = _truncate(f"[{state['pos'] + 1}/{n_quiz}] {q['savol']}", 300)
+    options = [_truncate(v, 100) for v in q["variantlar"]]
     correct_text = q["variantlar"][q["javob_index"]]
-    explanation = f"To'g'ri javob: {harflar[q['javob_index']]}) {correct_text}"
-    if len(explanation) > 200:
-        explanation = explanation[:197] + "..."
+    explanation = _truncate(f"To'g'ri javob: {correct_text}", 200)
 
     poll_msg = bot.send_poll(
         chat_id=chat_id,
-        question="Javobni tanlang:",
-        options=harflar,
+        question=question,
+        options=options,
         type="quiz",
         correct_option_id=q["javob_index"],
         is_anonymous=False,
