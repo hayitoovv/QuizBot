@@ -7,9 +7,19 @@ import re
 import time
 import threading
 
-TOKEN = os.environ.get("BOT_TOKEN", "Your bot token")
-if TOKEN == "Your bot token":
-    raise RuntimeError("BOT_TOKEN env variable o'rnatilmagan!")
+# .env fayldan o'qish (agar mavjud bo'lsa)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+TOKEN = os.environ.get("BOT_TOKEN", "")
+if not TOKEN:
+    raise RuntimeError(
+        "BOT_TOKEN topilmadi! Loyiha papkasida .env fayl yarating va ichiga "
+        "BOT_TOKEN=... yozing, yoki environment variable sifatida o'rnating."
+    )
 bot = telebot.TeleBot(TOKEN, num_threads=8)
 
 
