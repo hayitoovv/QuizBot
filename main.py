@@ -13,7 +13,20 @@ if TOKEN == "Your bot token":
 bot = telebot.TeleBot(TOKEN, num_threads=8)
 
 
-# ====== 429 (rate limit) retry — Telegram API call'lariga avtomat o'rab qo'yamiz ======
+# ====== Telegram API call'larini xavfsiz o'rash ======
+# - 429 (rate limit) → retry_after kutib qaytadan urinish
+# - "message is not modified" / "message to delete not found" → zararsiz, jim yutib yuborish
+# - Boshqa xatolar → log'ga yozib chiqamiz, lekin polling'ni to'xtatmaymiz
+
+_HARMLESS_TG_PHRASES = (
+    "message is not modified",
+    "message to delete not found",
+    "message to edit not found",
+    "query is too old",
+    "message can't be edited",
+)
+
+
 def _retry_429(fn, *args, **kwargs):
     for attempt in range(3):
         try:
@@ -28,7 +41,14 @@ def _retry_429(fn, *args, **kwargs):
                 print(f"⏳ 429 rate-limit, {wait}s kutilmoqda…")
                 time.sleep(wait + 0.5)
                 continue
-            raise
+            desc = (getattr(e, "description", "") or "").lower()
+            if any(p in desc for p in _HARMLESS_TG_PHRASES):
+                return None  # zararsiz, jim qaytamiz
+            print(f"⚠️ Telegram API xatosi: {e}")
+            return None
+        except Exception as e:
+            print(f"⚠️ Bot call xatosi: {e}")
+            return None
     return None
 
 
@@ -40,6 +60,15 @@ for _name in ("send_message", "send_poll", "edit_message_text",
             return _retry_429(orig, *a, **kw)
         return caller
     setattr(bot, _name, _wrap(_orig))
+
+
+# Handler'lardagi har qanday xato pollingni to'xtatmasligi uchun
+class _SilentExceptionHandler(telebot.ExceptionHandler):
+    def handle(self, exception):
+        print(f"⚠️ Handler xatosi (yutildi): {exception!r}")
+        return True  # xato handle qilingan, polling davom etsin
+
+bot.exception_handler = _SilentExceptionHandler()
 
 
 TESTS = {
